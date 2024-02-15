@@ -6,7 +6,7 @@ terraform {
     }
   }
 }
-# terraform apply -var="project_id=healthy-feat-412319"
+
 variable "project_id" {
   type        = string
   description = "this variable accepts project id"
