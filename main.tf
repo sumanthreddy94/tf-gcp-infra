@@ -42,6 +42,11 @@ variable "vpc_subnet_1_region" {
   description = "subnet-1 region"
 }
 
+variable "vpc_subnet_1_cidr" {
+  type        = string
+  description = "subnet-1 cidr"
+}
+
 variable "vpc_subnet_2" {
   type        = string
   description = "name of subnet-2"
@@ -50,6 +55,11 @@ variable "vpc_subnet_2" {
 variable "vpc_subnet_2_region" {
   type        = string
   description = "subnet-2 region"
+}
+
+variable "vpc_subnet_2_cidr" {
+  type        = string
+  description = "subnet-2 cidr"
 }
 
 variable "route_name" {
@@ -73,14 +83,14 @@ resource "google_compute_network" "vpc6225" {
 
 resource "google_compute_subnetwork" "webapp" {
   name          = var.vpc_subnet_1
-  ip_cidr_range = "10.0.0.0/24"
+  ip_cidr_range = var.vpc_subnet_1_cidr
   network       = google_compute_network.vpc6225.name
   region        = var.vpc_subnet_1_region
 }
 
 resource "google_compute_subnetwork" "db" {
   name          = var.vpc_subnet_2
-  ip_cidr_range = "10.0.1.0/24"
+  ip_cidr_range = var.vpc_subnet_2_cidr
   network       = google_compute_network.vpc6225.name
   region        = var.vpc_subnet_2_region
 }
