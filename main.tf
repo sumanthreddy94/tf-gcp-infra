@@ -2,7 +2,7 @@ terraform {
   required_providers {
     google = {
       source  = "hashicorp/google"
-      version = "5.16.0"
+      version = "5.17.0"
     }
   }
 }
@@ -72,6 +72,42 @@ variable "compute_intstance_name" {
   description = "Compute Instance Name"
 }
 
+variable "db_deletion_protection" {
+  type = bool
+  description = "prevents deletion - false"
+  default = false
+}
+
+variable "db_availability" {
+  type = string
+  description = "db availability defaults - REGIONAL"
+  default = "REGIONAL"
+}
+
+variable "db_disk_type" {
+  type = string
+  description = "db disk_type - pd-ssd"
+  default = "pd-ssd"
+}
+
+variable "db_disk_size" {
+  type = number
+  description = "db disk_size - pd-ssd"
+  default = 100
+}
+
+variable "db_ipv4_enabled" {
+  type = bool
+  description = "db ipv4_enabled - false"
+  default = false
+}
+
+variable "db_name" {
+  type = string
+  description = "db database"
+  default = "webapp"
+}
+
 provider "google" {
   credentials = var.credentials_path
   project     = var.project_id
@@ -86,11 +122,29 @@ resource "google_compute_network" "vpc6225" {
   delete_default_routes_on_create = true
 }
 
+resource "google_compute_global_address" "private_ip_address" {
+  name          = "webapp-ip-address"
+  purpose       = "VPC_PEERING"
+  address_type  = "INTERNAL"
+  ip_version = "IPV4"
+  prefix_length = 20
+  network       = google_compute_network.vpc6225.id
+  depends_on = [ google_compute_network.vpc6225 ]
+}
+
+resource "google_service_networking_connection" "connection" {
+  network                 = google_compute_network.vpc6225.id
+  service                 = "servicenetworking.googleapis.com"
+  reserved_peering_ranges = [google_compute_global_address.private_ip_address.name]
+  depends_on = [ google_compute_network.vpc6225, google_compute_global_address.private_ip_address ]
+}
+
 resource "google_compute_subnetwork" "webapp" {
   name          = var.vpc_subnet_1
   ip_cidr_range = var.vpc_subnet_1_cidr
   network       = google_compute_network.vpc6225.name
   region        = var.vpc_subnet_1_region
+  private_ip_google_access = true
   depends_on    = [google_compute_network.vpc6225]
 }
 
@@ -123,7 +177,7 @@ resource "google_compute_firewall" "allow_http" {
   target_tags   = ["http-webapp"]
   source_ranges = ["0.0.0.0/0"]
 }
- 
+
 resource "google_compute_firewall" "deny_ssh" {
   name        = "webappsshdeny"
   network     = google_compute_network.vpc6225.name
@@ -135,6 +189,45 @@ resource "google_compute_firewall" "deny_ssh" {
   target_tags   = ["http-server"]
   source_ranges = ["0.0.0.0/0"]
 }
+
+resource "google_sql_database_instance" "MYSQL" {
+  database_version = "MYSQL_8_0"
+  deletion_protection = var.db_deletion_protection
+  settings {
+    availability_type = var.db_availability
+    tier    = "db-f1-micro"
+    disk_type = var.db_disk_type
+    disk_size = var.db_disk_size
+    backup_configuration {
+      enabled            = true
+      binary_log_enabled = true
+    }
+    ip_configuration {
+      ipv4_enabled = var.db_ipv4_enabled
+      private_network = google_compute_network.vpc6225.id
+    }
+  }
+  
+  depends_on = [ google_compute_network.vpc6225, google_service_networking_connection.connection, google_compute_global_address.private_ip_address]
+}
+
+resource "google_sql_database" "webappDb" {
+  name = var.db_name
+  instance = google_sql_database_instance.MYSQL.name
+}
+
+resource "google_sql_user" "sqlUser" {
+  name = "webapp"
+  instance = google_sql_database_instance.MYSQL.name
+  password = random_password.password.result
+}
+
+resource "random_password" "password" {
+  length           = 16
+  special          = true
+  override_special = "!#$%&*()-_=+[]{}<>:?"
+}
+
 
 # This code is compatible with Terraform 4.25.0 and versions that are backwards compatible to 4.25.0.
 # For information about validating this Terraform code, see https://developer.hashicorp.com/terraform/tutorials/gcp-get-started/google-cloud-platform-build#format-and-validate-the-configuration
@@ -152,7 +245,15 @@ resource "google_compute_instance" "webapp_vm" {
 
     mode = "READ_WRITE"
   }
-
+  
+  metadata = {
+    startup-script = <<-EOF
+    #!/bin/bash
+    echo "export MYSQL_APP_USER=${google_sql_user.sqlUser.name}" >> /etc/environment
+    echo "export MYSQL_APP_PASSWORD=${google_sql_user.sqlUser.password}" >> /etc/environment
+    echo "export MYSQL_APP_HOST=${google_sql_database_instance.MYSQL.private_ip_address}" >> /etc/environment
+  EOF
+  }
   can_ip_forward      = false
   deletion_protection = false
   enable_display      = false
@@ -195,7 +296,7 @@ resource "google_compute_instance" "webapp_vm" {
   tags = ["http-webapp"]
   zone = var.provider_region_zone
 
-  depends_on = [ google_compute_subnetwork.webapp ]
+  depends_on = [ google_compute_subnetwork.webapp, google_sql_database_instance.MYSQL ]
 }
 
 
