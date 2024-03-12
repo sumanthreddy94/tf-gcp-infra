@@ -108,6 +108,18 @@ variable "db_name" {
   default = "webapp"
 }
 
+variable "db_username" {
+  type = string
+  description = "db database user name"
+  default = "webapp"
+}
+
+variable "boot_disk_size" {
+  type = number
+  description = "vm boot disk size"
+  default = 100
+}
+
 provider "google" {
   credentials = var.credentials_path
   project     = var.project_id
@@ -153,6 +165,7 @@ resource "google_compute_subnetwork" "db" {
   ip_cidr_range = var.vpc_subnet_2_cidr
   network       = google_compute_network.vpc6225.name
   region        = var.vpc_subnet_2_region
+  private_ip_google_access = false
   depends_on    = [google_compute_network.vpc6225]
 }
 
@@ -186,7 +199,7 @@ resource "google_compute_firewall" "deny_ssh" {
     protocol = "all"
   }
   priority      = 1000
-  target_tags   = ["http-server"]
+  target_tags   = ["http-webapp"]
   source_ranges = ["0.0.0.0/0"]
 }
 
@@ -217,15 +230,14 @@ resource "google_sql_database" "webappDb" {
 }
 
 resource "google_sql_user" "sqlUser" {
-  name = "webapp"
+  name = var.db_username
   instance = google_sql_database_instance.MYSQL.name
   password = random_password.password.result
 }
 
 resource "random_password" "password" {
   length           = 16
-  special          = true
-  override_special = "!#$%&*()-_=+[]{}<>:?"
+  special          = false
 }
 
 
@@ -239,7 +251,7 @@ resource "google_compute_instance" "webapp_vm" {
 
     initialize_params {
       image = "projects/${var.project_id}/global/images/webapp-custom-image"
-      size  = 100
+      size  = var.boot_disk_size
       type  = "pd-balanced"
     }
 
@@ -249,9 +261,10 @@ resource "google_compute_instance" "webapp_vm" {
   metadata = {
     startup-script = <<-EOF
     #!/bin/bash
-    echo "export MYSQL_APP_USER=${google_sql_user.sqlUser.name}" >> /etc/environment
-    echo "export MYSQL_APP_PASSWORD=${google_sql_user.sqlUser.password}" >> /etc/environment
-    echo "export MYSQL_APP_HOST=${google_sql_database_instance.MYSQL.private_ip_address}" >> /etc/environment
+    echo "MYSQL_APP_USER=${google_sql_user.sqlUser.name}" >> /etc/environment
+    echo "MYSQL_APP_PASSWORD=${google_sql_user.sqlUser.password}" >> /etc/environment
+    echo "MYSQL_APP_HOST=jdbc:mysql://${google_sql_database_instance.MYSQL.private_ip_address}:3306/webapp?createDatabaseIfNotExist=true" >> /etc/environment
+    . /etc/environment
   EOF
   }
   can_ip_forward      = false
