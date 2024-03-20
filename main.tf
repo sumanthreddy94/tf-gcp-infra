@@ -72,6 +72,12 @@ variable "compute_intstance_name" {
   description = "Compute Instance Name"
 }
 
+variable "image_name" {
+  type = string
+  description = "image name"
+  default = "webapp-custom-image"
+}
+
 variable "db_deletion_protection" {
   type = bool
   description = "prevents deletion - false"
@@ -118,6 +124,39 @@ variable "boot_disk_size" {
   type = number
   description = "vm boot disk size"
   default = 100
+}
+
+variable "dns_name" {
+  type = string
+  description = "dns name"
+  default = "sanumula6225.me."
+}
+
+variable "dns_managed_zone" {
+  type = string
+  default = "webapp-public-zone"
+}
+
+variable "account_id" {
+  type = string
+  description = "default dev account id"
+  default = "1018450228601"
+}
+
+variable "account_email" {
+  type = string
+  description = "default dev email account"
+  default = "1018450228601-compute@developer.gserviceaccount.com"
+}
+
+variable "vm_machine_type" {
+  type = string
+  default = "e2-medium"
+}
+
+variable "db_machine_type" {
+  type = string
+  default = "db-f1-micro"
 }
 
 provider "google" {
@@ -194,7 +233,7 @@ resource "google_compute_firewall" "allow_http" {
 resource "google_compute_firewall" "deny_ssh" {
   name        = "webappsshdeny"
   network     = google_compute_network.vpc6225.name
-  description = "creates firewall rule targetting tagged instances to deny ssh traffic"
+  description = "creates firewall rule targetting tagged instances to deny all ssh traffic"
   deny {
     protocol = "all"
   }
@@ -208,7 +247,7 @@ resource "google_sql_database_instance" "MYSQL" {
   deletion_protection = var.db_deletion_protection
   settings {
     availability_type = var.db_availability
-    tier    = "db-f1-micro"
+    tier    = var.db_machine_type
     disk_type = var.db_disk_type
     disk_size = var.db_disk_size
     backup_configuration {
@@ -240,6 +279,37 @@ resource "random_password" "password" {
   special          = false
 }
 
+resource "google_service_account" "service_account" {
+  account_id   = var.project_id
+  display_name = "VM Service Account"
+  create_ignore_already_exists = false
+}
+
+resource "google_project_iam_binding" "service_account_logging_writer" {
+  project = var.project_id
+  role    = "roles/logging.logWriter"
+
+  members = [
+    "serviceAccount:${google_service_account.service_account.email}",
+  ]
+}
+
+resource "google_project_iam_binding" "service_account_monitoring_writer" {
+  project = var.project_id
+  role    = "roles/monitoring.metricWriter"
+
+  members = [
+    "serviceAccount:${google_service_account.service_account.email}",
+  ]
+}
+
+resource "google_dns_record_set" "dns_record" {
+  name = var.dns_name
+  type = "A"
+  managed_zone = var.dns_managed_zone
+  rrdatas = [google_compute_instance.webapp_vm.network_interface[0].access_config[0].nat_ip]
+}
+
 
 # This code is compatible with Terraform 4.25.0 and versions that are backwards compatible to 4.25.0.
 # For information about validating this Terraform code, see https://developer.hashicorp.com/terraform/tutorials/gcp-get-started/google-cloud-platform-build#format-and-validate-the-configuration
@@ -250,7 +320,7 @@ resource "google_compute_instance" "webapp_vm" {
     device_name = var.compute_intstance_name
 
     initialize_params {
-      image = "projects/${var.project_id}/global/images/webapp-custom-image"
+      image = "projects/${var.project_id}/global/images/${var.image_name}"
       size  = var.boot_disk_size
       type  = "pd-balanced"
     }
@@ -263,7 +333,7 @@ resource "google_compute_instance" "webapp_vm" {
     #!/bin/bash
     echo "MYSQL_APP_USER=${google_sql_user.sqlUser.name}" >> /etc/environment
     echo "MYSQL_APP_PASSWORD=${google_sql_user.sqlUser.password}" >> /etc/environment
-    echo "MYSQL_APP_HOST=jdbc:mysql://${google_sql_database_instance.MYSQL.private_ip_address}:3306/webapp?createDatabaseIfNotExist=true" >> /etc/environment
+    echo "MYSQL_APP_HOST=jdbc:mysql://${google_sql_database_instance.MYSQL.private_ip_address}:3306/${google_sql_database.webappDb.name}?createDatabaseIfNotExist=true" >> /etc/environment
     . /etc/environment
   EOF
   }
@@ -275,7 +345,7 @@ resource "google_compute_instance" "webapp_vm" {
     goog-ec-src = "vm_add-tf"
   }
 
-  machine_type = "e2-medium"
+  machine_type = var.vm_machine_type
   name         = var.compute_intstance_name
 
   network_interface {
@@ -296,7 +366,7 @@ resource "google_compute_instance" "webapp_vm" {
   }
 
   service_account {
-    email  = "1018450228601-compute@developer.gserviceaccount.com"
+    email  = "${google_service_account.service_account.email}"
     scopes = ["https://www.googleapis.com/auth/devstorage.read_only", "https://www.googleapis.com/auth/logging.write", "https://www.googleapis.com/auth/monitoring.write", "https://www.googleapis.com/auth/service.management.readonly", "https://www.googleapis.com/auth/servicecontrol", "https://www.googleapis.com/auth/trace.append"]
   }
 
