@@ -137,16 +137,16 @@ variable "dns_managed_zone" {
   default = "webapp-public-zone"
 }
 
-variable "account_id" {
+variable "vm_account_id" {
   type = string
   description = "default dev account id"
-  default = "1018450228601"
+  default = "webapp-vm"
 }
 
-variable "account_email" {
+variable "fn_account_id" {
   type = string
-  description = "default dev email account"
-  default = "1018450228601-compute@developer.gserviceaccount.com"
+  description = "default dev account id"
+  default = "email-fn"
 }
 
 variable "vm_machine_type" {
@@ -157,6 +157,21 @@ variable "vm_machine_type" {
 variable "db_machine_type" {
   type = string
   default = "db-f1-micro"
+}
+
+variable "pubsub_email_topic_name" {
+  type = string
+  default = "verify_email"
+}
+
+variable "storage_bucket_name" {
+  type = string
+  default = "csye6225_sanumula"
+}
+
+variable "fn_object_path" {
+  type = string
+  default = "functions/email_notifications/serverless.zip"
 }
 
 provider "google" {
@@ -223,26 +238,26 @@ resource "google_compute_firewall" "allow_http" {
   description = "creates firewall rule targetting tagged instances to allow http traffic"
   allow {
     protocol = "tcp"
-    ports    = ["8030"]
+    ports    = ["8030","22"]
   }
   priority      = 999
   target_tags   = ["http-webapp"]
   source_ranges = ["0.0.0.0/0"]
 }
 
-resource "google_compute_firewall" "deny_ssh" {
-  name        = "webappsshdeny"
-  network     = google_compute_network.vpc6225.name
-  description = "creates firewall rule targetting tagged instances to deny all ssh traffic"
-  deny {
-    protocol = "all"
-  }
-  priority      = 1000
-  target_tags   = ["http-webapp"]
-  source_ranges = ["0.0.0.0/0"]
-}
+# resource "google_compute_firewall" "deny_ssh" {
+#   name        = "webappsshdeny"
+#   network     = google_compute_network.vpc6225.name
+#   description = "creates firewall rule targetting tagged instances to deny all ssh traffic"
+#   deny {
+#     protocol = "all"
+#   }
+#   priority      = 1000
+#   target_tags   = ["http-webapp"]
+#   source_ranges = ["0.0.0.0/0"]
+# }
 
-resource "google_sql_database_instance" "MYSQL" {
+resource "google_sql_database_instance" "MYSQL" { 
   database_version = "MYSQL_8_0"
   deletion_protection = var.db_deletion_protection
   settings {
@@ -279,18 +294,20 @@ resource "random_password" "password" {
   special          = false
 }
 
-resource "google_service_account" "service_account" {
-  account_id   = var.project_id
+resource "google_service_account" "vm_service_account" {
+  account_id   = var.vm_account_id
+  project = var.project_id
+
   display_name = "VM Service Account"
   create_ignore_already_exists = false
 }
 
 resource "google_project_iam_binding" "service_account_logging_writer" {
   project = var.project_id
-  role    = "roles/logging.logWriter"
+  role    = "roles/logging.admin"
 
   members = [
-    "serviceAccount:${google_service_account.service_account.email}",
+    "serviceAccount:${google_service_account.vm_service_account.email}",
   ]
 }
 
@@ -299,7 +316,16 @@ resource "google_project_iam_binding" "service_account_monitoring_writer" {
   role    = "roles/monitoring.metricWriter"
 
   members = [
-    "serviceAccount:${google_service_account.service_account.email}",
+    "serviceAccount:${google_service_account.vm_service_account.email}",
+  ]
+}
+
+resource "google_project_iam_binding" "service_account_topic_publish" {
+  project = var.project_id
+  role    = "roles/pubsub.publisher"
+
+  members = [
+    "serviceAccount:${google_service_account.vm_service_account.email}",
   ]
 }
 
@@ -308,7 +334,7 @@ resource "google_project_iam_binding" "service_account_token_creator" {
   role    = "roles/iam.serviceAccountTokenCreator"
 
   members = [
-    "serviceAccount:${google_service_account.service_account.email}",
+    "serviceAccount:${google_service_account.vm_service_account.email}",
   ]
 }
 
@@ -319,6 +345,56 @@ resource "google_dns_record_set" "dns_record" {
   rrdatas = [google_compute_instance.webapp_vm.network_interface[0].access_config[0].nat_ip]
 }
 
+resource "google_pubsub_schema" "email_schema" {
+  name = "email_schema"
+  type = "AVRO"
+  definition = "{\"type\":\"record\",\"name\":\"emailverify\",\"fields\":[{\"name\":\"username\",\"type\":\"string\"}]}"
+}
+
+resource "google_pubsub_topic" "verify_email" {
+  name = var.pubsub_email_topic_name
+  schema_settings {
+    schema = "projects/${var.project_id}/schemas/email_schema"
+    encoding = "JSON"
+  }
+  message_retention_duration = "604800s"
+}
+
+resource "google_cloudfunctions_function" "verify_email_fn" {
+  name        = "verify-email-fn"
+  description = "My function"
+  runtime     = "java17"
+
+  available_memory_mb   = 512
+  source_archive_bucket = var.storage_bucket_name
+  source_archive_object = var.fn_object_path
+  entry_point           = "com.myjava.functions.SendVerifyMail"
+  event_trigger {
+    event_type = "providers/cloud.pubsub/eventTypes/topic.publish"
+    resource = google_pubsub_topic.verify_email.id
+  }
+  vpc_connector = google_vpc_access_connector.vpc_access.id
+  environment_variables = {
+      MYSQL_APP_USER=google_sql_user.sqlUser.name
+      MYSQL_APP_PASSWORD=google_sql_user.sqlUser.password
+      MYSQL_APP_HOST="jdbc:mysql://${google_sql_database_instance.MYSQL.private_ip_address}:3306/${google_sql_database.webappDb.name}?createDatabaseIfNotExist=true"
+      DNS_NAME="${google_dns_record_set.dns_record.name}"
+    }
+}
+# csye6225dev-414621@appspot.gserviceaccount.com
+resource "google_vpc_access_connector" "vpc_access" {
+  name = "sql-vpc-connector"
+  network = google_compute_network.vpc6225.id
+  ip_cidr_range = "10.8.0.0/28"
+}
+resource "google_project_iam_binding" "fn_service_account_mysql_admin" {
+  project = var.project_id
+  role    = "roles/cloudsql.admin"
+
+  members = [
+    "serviceAccount:${var.project_id}@appspot.gserviceaccount.com",
+  ]
+}
 
 # This code is compatible with Terraform 4.25.0 and versions that are backwards compatible to 4.25.0.
 # For information about validating this Terraform code, see https://developer.hashicorp.com/terraform/tutorials/gcp-get-started/google-cloud-platform-build#format-and-validate-the-configuration
@@ -338,12 +414,15 @@ resource "google_compute_instance" "webapp_vm" {
   }
   
   metadata = {
+    # echo "DNS_NAME=$(echo ${google_dns_record_set.dns_record.name} | sed 's/\.$//')" >> /etc/environment
     startup-script = <<-EOF
     #!/bin/bash
     echo "MYSQL_APP_USER=${google_sql_user.sqlUser.name}" >> /etc/environment
     echo "MYSQL_APP_PASSWORD=${google_sql_user.sqlUser.password}" >> /etc/environment
-    echo "MYSQL_APP_HOST=jdbc:mysql://${google_sql_database_instance.MYSQL.private_ip_address}:3306/${google_sql_database.webappDb.name}?createDatabaseIfNotExist=true" >> /etc/environment
-    gcloud auth application-default login --impersonate-service-account ${google_service_account.service_account.email}
+    echo "MYSQL_APP_HOST=jdbc:mysql://${google_sql_database_instance.MYSQL.private_ip_address}:3306/${google_sql_database.webappDb.name}?createDatabaseIfNotExist=true" >> /etc/environment   
+    echo "GOOGLE_PROJECT_ID=${var.project_id}" >> /etc/environment
+    echo "GOOGLE_TOPIC_ID=${google_pubsub_topic.verify_email.id}" >> /etc/environment
+    gcloud auth application-default login --impersonate-service-account ${google_service_account.vm_service_account.email}
     . /etc/environment
   EOF
   }
@@ -376,8 +455,8 @@ resource "google_compute_instance" "webapp_vm" {
   }
 
   service_account {
-    email  = "${google_service_account.service_account.email}"
-    scopes = ["https://www.googleapis.com/auth/devstorage.read_only", "https://www.googleapis.com/auth/logging.write", "https://www.googleapis.com/auth/monitoring.write", "https://www.googleapis.com/auth/service.management.readonly", "https://www.googleapis.com/auth/servicecontrol", "https://www.googleapis.com/auth/trace.append", "https://www.googleapis.com/auth/cloud-platform"]
+    email  = "${google_service_account.vm_service_account.email}"
+    scopes = ["https://www.googleapis.com/auth/devstorage.read_only", "https://www.googleapis.com/auth/logging.write", "https://www.googleapis.com/auth/monitoring.write", "https://www.googleapis.com/auth/service.management.readonly", "https://www.googleapis.com/auth/servicecontrol", "https://www.googleapis.com/auth/trace.append", "https://www.googleapis.com/auth/pubsub", "https://www.googleapis.com/auth/cloud-platform"]
   }
 
   shielded_instance_config {
@@ -391,5 +470,4 @@ resource "google_compute_instance" "webapp_vm" {
 
   depends_on = [ google_compute_subnetwork.webapp, google_sql_database_instance.MYSQL ]
 }
-
 
