@@ -303,6 +303,15 @@ resource "google_project_iam_binding" "service_account_monitoring_writer" {
   ]
 }
 
+resource "google_project_iam_binding" "service_account_token_creator" {
+  project = var.project_id
+  role    = "roles/iam.serviceAccountTokenCreator"
+
+  members = [
+    "serviceAccount:${google_service_account.service_account.email}",
+  ]
+}
+
 resource "google_dns_record_set" "dns_record" {
   name = var.dns_name
   type = "A"
@@ -334,6 +343,7 @@ resource "google_compute_instance" "webapp_vm" {
     echo "MYSQL_APP_USER=${google_sql_user.sqlUser.name}" >> /etc/environment
     echo "MYSQL_APP_PASSWORD=${google_sql_user.sqlUser.password}" >> /etc/environment
     echo "MYSQL_APP_HOST=jdbc:mysql://${google_sql_database_instance.MYSQL.private_ip_address}:3306/${google_sql_database.webappDb.name}?createDatabaseIfNotExist=true" >> /etc/environment
+    gcloud auth application-default login --impersonate-service-account ${google_service_account.service_account.email}
     . /etc/environment
   EOF
   }
@@ -367,7 +377,7 @@ resource "google_compute_instance" "webapp_vm" {
 
   service_account {
     email  = "${google_service_account.service_account.email}"
-    scopes = ["https://www.googleapis.com/auth/devstorage.read_only", "https://www.googleapis.com/auth/logging.write", "https://www.googleapis.com/auth/monitoring.write", "https://www.googleapis.com/auth/service.management.readonly", "https://www.googleapis.com/auth/servicecontrol", "https://www.googleapis.com/auth/trace.append"]
+    scopes = ["https://www.googleapis.com/auth/devstorage.read_only", "https://www.googleapis.com/auth/logging.write", "https://www.googleapis.com/auth/monitoring.write", "https://www.googleapis.com/auth/service.management.readonly", "https://www.googleapis.com/auth/servicecontrol", "https://www.googleapis.com/auth/trace.append", "https://www.googleapis.com/auth/cloud-platform"]
   }
 
   shielded_instance_config {
