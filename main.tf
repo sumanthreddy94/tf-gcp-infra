@@ -238,24 +238,24 @@ resource "google_compute_firewall" "allow_http" {
   description = "creates firewall rule targetting tagged instances to allow http traffic"
   allow {
     protocol = "tcp"
-    ports    = ["8030","22"]
+    ports    = ["8030"]
   }
   priority      = 999
   target_tags   = ["http-webapp"]
   source_ranges = ["0.0.0.0/0"]
 }
 
-# resource "google_compute_firewall" "deny_ssh" {
-#   name        = "webappsshdeny"
-#   network     = google_compute_network.vpc6225.name
-#   description = "creates firewall rule targetting tagged instances to deny all ssh traffic"
-#   deny {
-#     protocol = "all"
-#   }
-#   priority      = 1000
-#   target_tags   = ["http-webapp"]
-#   source_ranges = ["0.0.0.0/0"]
-# }
+resource "google_compute_firewall" "deny_ssh" {
+  name        = "webappsshdeny"
+  network     = google_compute_network.vpc6225.name
+  description = "creates firewall rule targetting tagged instances to deny all ssh traffic"
+  deny {
+    protocol = "all"
+  }
+  priority      = 1000
+  target_tags   = ["http-webapp"]
+  source_ranges = ["0.0.0.0/0"]
+}
 
 resource "google_sql_database_instance" "MYSQL" { 
   database_version = "MYSQL_8_0"
