@@ -174,6 +174,31 @@ variable "fn_object_path" {
   default = "functions/email_notifications/serverless.zip"
 }
 
+variable "min" {
+  type = number
+  default = 1
+}
+
+variable "max" {
+  type = number
+  default = 5
+}
+
+variable "cpu_util" {
+  type = number
+  default = 0.5
+}
+
+variable "cool_down_period" {
+  type = number
+  default = 90
+}
+
+variable "health_src_range" {
+  type = string
+  default = "0.0.0.0/0"
+}
+
 provider "google" {
   credentials = var.credentials_path
   project     = var.project_id
@@ -342,7 +367,7 @@ resource "google_dns_record_set" "dns_record" {
   name = var.dns_name
   type = "A"
   managed_zone = var.dns_managed_zone
-  rrdatas = [google_compute_instance.webapp_vm.network_interface[0].access_config[0].nat_ip]
+  rrdatas = [google_compute_global_address.webapp_address.address]
 }
 
 resource "google_pubsub_schema" "email_schema" {
@@ -381,6 +406,7 @@ resource "google_cloudfunctions_function" "verify_email_fn" {
       DNS_NAME="${google_dns_record_set.dns_record.name}"
     }
 }
+
 # csye6225dev-414621@appspot.gserviceaccount.com
 resource "google_vpc_access_connector" "vpc_access" {
   name = "sql-vpc-connector"
@@ -396,25 +422,18 @@ resource "google_project_iam_binding" "fn_service_account_mysql_admin" {
   ]
 }
 
-# This code is compatible with Terraform 4.25.0 and versions that are backwards compatible to 4.25.0.
-# For information about validating this Terraform code, see https://developer.hashicorp.com/terraform/tutorials/gcp-get-started/google-cloud-platform-build#format-and-validate-the-configuration
 
-resource "google_compute_instance" "webapp_vm" {
-  boot_disk {
+resource "google_compute_region_instance_template" "webapp_vm" {
+  disk {
     auto_delete = true
     device_name = var.compute_intstance_name
-
-    initialize_params {
-      image = "projects/${var.project_id}/global/images/${var.image_name}"
-      size  = var.boot_disk_size
-      type  = "pd-balanced"
-    }
-
+    disk_size_gb = var.boot_disk_size
+    disk_type  = "pd-balanced"
+    source_image = "projects/${var.project_id}/global/images/${var.image_name}"
     mode = "READ_WRITE"
   }
   
   metadata = {
-    # echo "DNS_NAME=$(echo ${google_dns_record_set.dns_record.name} | sed 's/\.$//')" >> /etc/environment
     startup-script = <<-EOF
     #!/bin/bash
     echo "MYSQL_APP_USER=${google_sql_user.sqlUser.name}" >> /etc/environment
@@ -427,8 +446,6 @@ resource "google_compute_instance" "webapp_vm" {
   EOF
   }
   can_ip_forward      = false
-  deletion_protection = false
-  enable_display      = false
 
   labels = {
     goog-ec-src = "vm_add-tf"
@@ -465,9 +482,158 @@ resource "google_compute_instance" "webapp_vm" {
     enable_vtpm                 = true
   }
 
-  tags = ["http-webapp"]
-  zone = var.provider_region_zone
+  tags = ["http-webapp", "allow-health-check"]
 
   depends_on = [ google_compute_subnetwork.webapp, google_sql_database_instance.MYSQL ]
+}
+
+resource "google_compute_health_check" "webapp_http_health_check" {
+  name        = "webapp-http-health-check"
+  description = "Health check via http"
+
+  timeout_sec         = 5
+  check_interval_sec  = 5
+  healthy_threshold   = 2
+  unhealthy_threshold = 10
+
+  http_health_check {
+    port_name = "webapp-http"
+    port = "8030"
+    request_path = "/healthz"
+  }
+}
+
+resource "google_compute_region_instance_group_manager" "webapp_server" {
+  name = "webapp-vm-group"
+  base_instance_name = "webapp"
+  region = var.provider_region
+  version {
+    name = "webapp-instance"
+    instance_template = google_compute_region_instance_template.webapp_vm.self_link
+  }
+  auto_healing_policies {
+    health_check = google_compute_health_check.webapp_http_health_check.id
+    initial_delay_sec = 300
+  }
+  named_port {
+    name = "webapp-port"
+    port = 8030
+  }
+}
+
+resource "google_compute_region_autoscaler" "webapp_auto_scaler" {
+  name = "webapp-autoscaler"
+  target = google_compute_region_instance_group_manager.webapp_server.id
+  autoscaling_policy {
+    max_replicas = var.max
+    min_replicas = var.min
+    cooldown_period = var.cool_down_period
+    cpu_utilization {
+      target = var.cpu_util
+    }
+  }
+}
+
+resource "google_compute_backend_service" "webapp_backend" {
+  name                    = "webapp-backend-service"
+  protocol                = "HTTP"
+  port_name               = "webapp-port"
+  load_balancing_scheme   = "EXTERNAL"
+  timeout_sec             = 10
+  health_checks           = [google_compute_health_check.webapp_http_health_check.id]
+  backend {
+    group           = google_compute_region_instance_group_manager.webapp_server.instance_group
+    balancing_mode  = "UTILIZATION"
+    capacity_scaler = 1.0
+  }
+}
+
+resource "google_compute_global_address" "webapp_address" {
+  name     = "webapp-static-ip"
+}
+
+resource "google_compute_url_map" "webapp_url_map" {
+  name            = "webapp-url-map"
+  default_service = google_compute_backend_service.webapp_backend.id
+}
+
+# http proxy
+resource "google_compute_target_https_proxy" "webapp_proxy" {
+  name     = "webapp-target-https-proxy"
+  url_map  = google_compute_url_map.webapp_url_map.id
+  certificate_map = "//certificatemanager.googleapis.com/${google_certificate_manager_certificate_map.webapp_cert_map.id}"
+}
+
+resource "google_certificate_manager_certificate_map" "webapp_cert_map" {
+  name        = "cert-map"
+  description = "webapp certificate map"
+  labels      = {
+    "terraform" : true,
+    "acc-test"  : true,
+  }
+}
+
+resource "google_certificate_manager_certificate_map_entry" "webapp_cert_map_entry" {
+  name        = "webapp-cert-entry"
+  description = "example certificate map entry"
+  map         = google_certificate_manager_certificate_map.webapp_cert_map.name
+  labels = {
+    "terraform" : true
+  }
+  certificates = [google_certificate_manager_certificate.webapp_v1_cert.id]
+  hostname     = "sanumula6225.me"
+}
+
+resource "google_compute_global_forwarding_rule" "webapp_fwd_rule" {
+  name                  = "webapp-forwarding-rule"
+  ip_protocol           = "TCP"
+  load_balancing_scheme = "EXTERNAL"
+  port_range            = "443"
+  target                = google_compute_target_https_proxy.webapp_proxy.id
+  ip_address            = google_compute_global_address.webapp_address.address
+}
+
+resource "google_compute_firewall" "health_check" {
+  name          = "webapp-allow-hc"
+  direction     = "INGRESS"
+  network       = google_compute_network.vpc6225.id
+  allow {
+    protocol = "tcp"
+    ports = ["8030"]
+  }
+  source_ranges=[var.health_src_range]
+  priority = 998
+  target_tags = ["allow-health-check"]
+}
+
+resource "google_certificate_manager_dns_authorization" "default" {
+  name        = "new-dnsauth-a08"
+  description = "The default dns auth"
+  domain      = "sanumula6225.me"
+  labels = {
+    "terraform" : true
+  }
+}
+
+resource "google_dns_record_set" "cname" {
+  name         = google_certificate_manager_dns_authorization.default.dns_resource_record[0].name
+  managed_zone = "webapp-public-zone"
+  type         = google_certificate_manager_dns_authorization.default.dns_resource_record[0].type
+  ttl          = 300
+  rrdatas      = [google_certificate_manager_dns_authorization.default.dns_resource_record[0].data]
+}
+
+resource "google_certificate_manager_certificate" "webapp_v1_cert" {
+  name        = "webapp-v1-cert"
+  description = "The wildcard cert"
+  managed {
+    domains = ["sanumula6225.me"]
+    dns_authorizations = [
+      google_certificate_manager_dns_authorization.default.id
+    ]
+  }
+  labels = {
+    "terraform" : true
+  }
 }
 
